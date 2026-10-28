@@ -11,8 +11,17 @@ import sys
 import time
 
 from common import meta
-from indexer import f95zone, reviews
-from indexer.reviewstore import ReviewStore
+
+try:
+    from indexer import f95zone, reviews
+    from indexer.reviewstore import ReviewStore
+except ImportError as exc:
+    missing = getattr(exc, "name", None) or str(exc)
+    print(f"error: missing Python dependency ({missing})", file=sys.stderr)
+    print("hint: install the exporter requirements, using the virtualenv's own python:", file=sys.stderr)
+    print("  python3 -m pip install -r requirements-reviews.txt", file=sys.stderr)
+    print("  .venv/bin/python -m pip install -r requirements-reviews.txt   # if the venv is not on PATH", file=sys.stderr)
+    sys.exit(1)
 
 DEFAULT_OUT_DIR = "reviews"
 

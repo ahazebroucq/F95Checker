@@ -19,18 +19,33 @@ Results are written to **Markdown** (one file per thread) and optionally **JSONL
 ## 1. Requirements
 
 * Python 3.11 or newer (same as the app)
-* A few libraries — the scraper reuses the indexer's HTTP stack:
+* Four libraries — the scraper reuses the indexer's HTTP stack
+
+**Use a virtualenv.** Recent distros (Arch, Debian, Fedora, ...) refuse system-wide pip
+installs with `externally-managed-environment` (PEP 668):
 
 ```bash
-python -m pip install -r requirements-indexer.txt
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -c 'import sys; print(sys.prefix); print(sys.base_prefix)'   # these must differ
+python3 -m pip install -r requirements-reviews.txt
 ```
 
-`requirements-indexer.txt` also pulls FastAPI/Redis/uvicorn which the CLI does not need, if you
-prefer a minimal install:
+If pip *still* complains about an externally managed environment **while the venv looks
+active**, then the interpreter running pip is not the venv's — usually a stale shell command
+cache or another `python3` earlier in `PATH`. Bypass it entirely:
 
 ```bash
-python -m pip install aiohttp aiolimiter beautifulsoup4 lxml
+.venv/bin/python -m pip install -r requirements-reviews.txt
+.venv/bin/python reviews-main.py --id 44173
 ```
+
+(`rehash` in zsh / `hash -r` in bash also fixes the cached-path case.)
+
+`requirements-reviews.txt` lists only what the exporter needs, as **minimum** versions instead of
+exact pins, because the pinned versions in `requirements-indexer.txt` (`lxml==5.3.0`,
+`aiohttp==3.11.11`, ...) frequently have no wheels for very new Python releases and then fail to
+build. If you already have the indexer requirements installed, they work too.
 
 You do **not** need the GUI requirements, and you do not need to run the indexer or Redis.
 
