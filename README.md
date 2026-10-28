@@ -171,6 +171,14 @@ Please note that this extension is solely to aid the usage of the desktop tool, 
   a green tick, open one, scroll down to the `Artifacts` section, look for your platform and click on it to download.
   Keep in mind you will need to be logged into GitHub to download.
 
+- **How do I export all reviews of a game?**
+
+  There is a small CLI for that: `reviews-main.py`. Given a thread id, URL or game title it collects
+  every review of that thread (author, score, date, helpful votes, permalinks, reviewer stats) and
+  writes them to Markdown, optionally JSONL. See **[REVIEWS.md](REVIEWS.md)** for setup and usage.
+  Note that F95zone only shows the first page of reviews to guests, so a logged in `xf_user` cookie
+  is required for threads with more than 20 reviews.
+
 - **How long will it take for changes on the forum to be detected by F95Checker?**
 
   Check the "About the speed™" section below, especially the flowchart.

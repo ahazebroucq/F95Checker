@@ -48,6 +48,39 @@ class ParsedReviews:
     total: int
     items: list[ParsedReview]
 
+
+# Rich review records, only used by the bulk review scraper (reviews-main.py).
+# The cache indexer keeps using ParsedReview above, which is what the client consumes.
+@dataclasses.dataclass(slots=True)
+class ParsedReviewItem:
+    id: int
+    user: str
+    user_id: int
+    permalink: str
+    score: float
+    message: str
+    helpful_yes: int
+    helpful_no: int
+    author_record: str
+    author_reviews: int
+    author_average: float
+    timestamp: int
+    iso_date: str
+    page: int
+
+
+@dataclasses.dataclass(slots=True)
+class ParsedReviewPage:
+    total: int
+    page: int
+    per_page: int
+    average: float
+    title: str
+    guest_limited: bool
+    items: list[ParsedReviewItem]
+
+
+reviews_per_page = 20
 f95_host = "https://f95zone.to/"
 
 # [^\S\r\n] = whitespace but not newlines
@@ -529,52 +562,181 @@ developer_remove_patterns = [
 ]
 
 
-def reviews(res: bytes) -> ParsedReviews | ParserError:
+def _review_page_title(html: bs4.BeautifulSoup) -> str:
+    if (elem := html.find(is_class("p-title-value"))) is None:
+        return ""
+    title = ""
+    for child in elem.children:
+        if is_class("label")(child) or is_class("label-append")(child) or is_class("p-title-prefix")(child):
+            continue
+        title += child.text
+    return fixed_spaces(sanitize_whitespace(title))
+
+
+def _review_page_total(html: bs4.BeautifulSoup) -> int:
+    if (banner := html.find(is_class("f95rv-banner-count"))) is not None:
+        if match := re.search(r"([\d,]+)\s+reviews?", banner.get_text(" ", strip=True), re.M | re.I):
+            return int(match.group(1).replace(",", ""))
+    if (tabs := html.find(is_class("tabs"))) is not None:
+        if match := re.search(r"reviews\s*\(([\d,]+)\)", tabs.get_text(), re.M | re.I):
+            return int(match.group(1).replace(",", ""))
+    return 0
+
+
+def _review_page_average(html: bs4.BeautifulSoup) -> float:
+    if (elem := html.find(is_class("f95rv-stats-average"))) is not None:
+        if match := re.match(r"\s*([\d.]+)", elem.get_text(" ", strip=True)):
+            try:
+                return float(match.group(1))
+            except ValueError:
+                pass
+    return 0.0
+
+
+def _review_message(card: bs4.element.Tag) -> str:
+    body = card.find(is_class("f95rv-card-body"))
+    if body is None:
+        return ""
+    # The actual post body is wrapped in a nested bbWrapper
+    if (wrapper := body.find(is_class("bbWrapper"))) is not None:
+        body = wrapper
+    message = body.get_text()
+    for goofy_unicode in "\u2063\u200c\u200b\u2064":
+        message = message.replace(goofy_unicode, "")
+    return clean_text(message)
+
+
+def review_page(res: bytes, page: int = 1) -> ParsedReviewPage | ParserError:
+    """Parse a full /threads/{id}/reviews/ page, keeping all metadata of that page's reviews."""
     try:
         html = _html(res)
         body = html.find(is_class("p-body-pageContent"))
         if body is None:
             logo = html.select_one(".p-header-logo img")
             if logo and logo.attrs.get("alt", "").startswith("F95zone"):
-                e = ParserError(
-                    message="Thread structure missing",
-                    dump=res,
-                )
-            else:
-                e = ParserError(
-                    message="Not an F95zone payload",
-                    dump=res,
-                )
-            return e
-        parsed_reviews = []
-        reviews_list = body.find(is_class("f95rv-cards"))
-        if reviews_list:
-            for review in reviews_list.find_all(is_class("f95rv-card")):
-                user = review.get("data-author")
-                score = int(review.find(is_class("f95rv-stars")).get("aria-label")[0])
-                message = review.find(is_class("bbWrapper")).find(is_class("bbWrapper")).get_text()
-                for goofy_unicode in "\u2063\u200c\u200b\u2064":
-                    message = message.replace(goofy_unicode, "")
-                likes = int(review.find(is_class("f95rv-vote")).get_text().split(" ")[-1])
-                timestamp = int(review.find(is_class("u-dt")).get("data-timestamp"))
-                parsed_review = ParsedReview(
-                    user=user,
-                    score=score,
-                    message=message,
-                    likes=likes,
-                    timestamp=timestamp,
-                )
-                parsed_reviews.append(parsed_review)
-        match = re.search(r"reviews\s*\(([\d,]+)\)", html.find(is_class("tabs")).get_text(), re.M | re.I)
-        total = int(match.group(1).replace(",", ""))
+                return ParserError(message="Thread structure missing", dump=res)
+            return ParserError(message="Not an F95zone payload", dump=res)
+        items = []
+        if (cards := body.find(is_class("f95rv-cards"))) is not None:
+            items = [_review_card(card, page) for card in cards.find_all(is_class("f95rv-card"))]
+        return ParsedReviewPage(
+            total=_review_page_total(html),
+            page=page,
+            per_page=len(items),
+            average=_review_page_average(html),
+            title=_review_page_title(html),
+            # Guests only get the first page of reviews, F95zone hides the rest
+            guest_limited=body.find(is_class("f95rv-guestNote")) is not None,
+            items=items,
+        )
     except Exception:
-        e = ParserError(
+        return ParserError(
             message=f"Unhandled exception: {error.text()}",
             dump=error.traceback()
         )
-        return e
-    ret = ParsedReviews(
-        total=total,
-        items=parsed_reviews,
+
+
+
+def _review_card(card: bs4.element.Tag, page: int) -> ParsedReviewItem:
+    review_id = 0
+    if (content := card.get("data-content")) and (match := re.search(r"review-(\d+)", content)):
+        review_id = int(match.group(1))
+    elif (anchor := card.find(is_class("u-anchorTarget"))) is not None:
+        if match := re.match(r"review-(\d+)$", anchor.get("id", "")):
+            review_id = int(match.group(1))
+
+    user_id = 0
+    if (member := card.find("a", attrs={"data-user-id": True})) is not None:
+        try:
+            user_id = int(member["data-user-id"])
+        except ValueError:
+            pass
+
+    permalink = ""
+    if (link := card.find("a", href=re.compile(r"^/thread-reviews/\d+/?$"))) is not None:
+        permalink = f95_host + link["href"].removeprefix("/")
+    elif review_id:
+        permalink = f"{f95_host}thread-reviews/{review_id}/"
+
+    score = 0.0
+    try:
+        if (rating := card.find(is_class("f95rv-card-rating"))) is not None:
+            score = float(rating.get_text(strip=True))
+        elif (stars := card.find(is_class("f95rv-stars"))) is not None:
+            if match := re.search(r"([\d.]+)", stars.get("aria-label", "")):
+                score = float(match.group(1))
+    except ValueError:
+        score = 0.0
+
+    helpful_yes = 0
+    helpful_no = 0
+    for vote in card.find_all(is_class("f95rv-vote")):
+        label, _, count = vote.get_text(" ", strip=True).partition("·")
+        count = re.sub(r"[^\d]", "", count) or "0"
+        if label.strip().lower().startswith("yes"):
+            helpful_yes = int(count)
+        else:
+            helpful_no = int(count)
+
+    author_record = ""
+    author_reviews = 0
+    author_average = 0.0
+    if (record := card.find(is_class("f95rv-record"))) is not None:
+        author_record = fixed_spaces(sanitize_whitespace(record.get_text(" ", strip=True)))
+        if match := re.search(r"([\d,]+)\s+reviews?", author_record, re.I):
+            try:
+                author_reviews = int(match.group(1).replace(",", ""))
+            except ValueError:
+                pass
+        if match := re.search(r"gives\s+([\d.]+)", author_record, re.I):
+            try:
+                author_average = float(match.group(1))
+            except ValueError:
+                pass
+
+    timestamp = 0
+    iso_date = ""
+    if (elem := card.find(is_class("u-dt"))) is not None:
+        try:
+            timestamp = int(elem.get("data-timestamp") or 0)
+        except ValueError:
+            timestamp = 0
+        iso_date = elem.get("datetime") or ""
+
+    return ParsedReviewItem(
+        id=review_id,
+        user=card.get("data-author", ""),
+        user_id=user_id,
+        permalink=permalink,
+        score=score,
+        message=_review_message(card),
+        helpful_yes=helpful_yes,
+        helpful_no=helpful_no,
+        author_record=author_record,
+        author_reviews=author_reviews,
+        author_average=author_average,
+        timestamp=timestamp,
+        iso_date=iso_date,
+        page=page,
     )
-    return ret
+
+
+
+def reviews(res: bytes) -> ParsedReviews | ParserError:
+    """What the cache indexer consumes: first page of reviews, reduced to the client schema."""
+    page = review_page(res, 1)
+    if isinstance(page, ParserError):
+        return page
+    return ParsedReviews(
+        total=page.total,
+        items=[
+            ParsedReview(
+                user=item.user,
+                score=int(round(item.score)),
+                message=item.message,
+                likes=item.helpful_yes,
+                timestamp=item.timestamp,
+            )
+            for item in page.items
+        ],
+    )
